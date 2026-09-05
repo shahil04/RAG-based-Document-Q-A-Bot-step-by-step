@@ -58,6 +58,10 @@ Project Settings
 Database
        ↓
 Connection string
+
+use the pooler string 
+DATABASE_URL=postgresql://postgres.wnhroarxwhcjowwljbub:[password]@ap-southeast-2.pooler.supabase.com:5432/postgres
+
 ```
 
 We will use the PostgreSQL connection string.
