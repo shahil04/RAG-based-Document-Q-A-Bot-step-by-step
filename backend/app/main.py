@@ -1,16 +1,19 @@
 from fastapi import FastAPI
 
+from app.api.health import router as health_router
+from app.core.config import APP_NAME, APP_VERSION
+
 app = FastAPI(
-    title="Document Q&A API",
+    title=APP_NAME,
     description="RAG Based Document Question Answering System",
-    version="1.0.0",
+    version=APP_VERSION,
 )
-# add for health checker for api
-from api.health import router as health_router
 app.include_router(health_router)
 
 
 @app.get("/")
 def root():
-    return { "message": "Hello from Fastapi backend"}
-
+    return {
+        "message": "Document Q&A API is running",
+        "version": APP_VERSION
+    }
