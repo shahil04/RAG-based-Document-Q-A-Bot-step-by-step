@@ -1,823 +1,614 @@
-# Step 4 — Document Processing
+# Step 6 — Semantic Search 🔎
 
-Now we move from **uploading a document** to **extracting and preparing its text for RAG**.
+Now that our document chunks are stored in **Pinecone**, we need to retrieve the most relevant chunks when a user asks a question.
 
-Our goal:
+Our pipeline becomes:
 
 ```text
-PDF / DOCX / TXT
-        ↓
-   Text Extraction
-        ↓
-      Cleaning
-        ↓
-      Chunking
-        ↓
-   Ready for Embeddings
+User Question
+      ↓
+Question Embedding
+      ↓
+Pinecone Similarity Search
+      ↓
+Top Relevant Chunks
+      ↓
+Filter by user_id
+      ↓
+Retrieved Context
 ```
 
-We will use **LangChain** for document loading and chunking.
+This is the **Retrieval** part of RAG.
 
 ---
 
-## 4.1 Install LangChain Document Processing Packages
+## 6.1 Real-world problem
 
-From `backend`:
-
-```bash
-uv add langchain
-uv add langchain-community
-uv add pypdf
-uv add python-docx
-```
-
-We now have:
-
-```text
-FastAPI
-   │
-   ├── Supabase PostgreSQL
-   ├── Local Storage
-   │
-   └── LangChain
-          │
-          ├── PDF Loader
-          ├── DOCX Loader
-          └── Text Splitter
-```
-
----
-
-# 4.2 Update Folder Structure
-
-Add:
-
-```text
-backend/
-│
-├── app/
-│   │
-│   ├── api/
-│   │   ├── auth.py
-│   │   ├── health.py
-│   │   └── documents.py
-│   │
-│   ├── services/
-│   │   ├── document_processor.py     ← NEW
-│   │   │
-│   │   └── storage/
-│   │       └── local_storage.py
-│   │
-│   ├── rag/
-│   │   ├── loader.py                 ← NEW
-│   │   └── splitter.py               ← NEW
-│   │
-│   └── ...
-│
-└── uploads/
-```
-
-We'll keep **document processing separate from the API route**.
-
----
-
-# 4.3 Create Document Loader
-
-Create:
-
-```text
-app/rag/loader.py
-```
-
-```python
-from pathlib import Path
-
-from langchain_community.document_loaders import (
-    PyPDFLoader,
-    Docx2txtLoader,
-    TextLoader,
-)
-
-
-def load_document(file_path: str):
-
-    extension = Path(file_path).suffix.lower()
-
-    if extension == ".pdf":
-
-        loader = PyPDFLoader(file_path)
-
-    elif extension == ".docx":
-
-        loader = Docx2txtLoader(file_path)
-
-    elif extension == ".txt":
-
-        loader = TextLoader(
-            file_path,
-            encoding="utf-8"
-        )
-
-    else:
-
-        raise ValueError(
-            f"Unsupported file type: {extension}"
-        )
-
-    return loader.load()
-```
-
----
-
-# 4.4 What Does `loader.load()` Return?
-
-Suppose we upload:
+Suppose a student uploaded:
 
 ```text
 python.pdf
+machine_learning.pdf
+fastapi.pdf
 ```
 
-with 10 pages.
+Then asks:
 
-LangChain returns something conceptually like:
+> What is dependency injection in FastAPI?
 
-```python
-[
-    Document(
-        page_content="Python is a programming language...",
-        metadata={
-            "source": "uploads/abc.pdf",
-            "page": 0
-        }
-    ),
-
-    Document(
-        page_content="Python supports object-oriented...",
-        metadata={
-            "source": "uploads/abc.pdf",
-            "page": 1
-        }
-    ),
-
-    ...
-]
-```
-
-So:
-
-```text
-PDF
- ↓
-Page 1 → Document
-Page 2 → Document
-Page 3 → Document
-...
-```
-
-The metadata is very useful later.
-
-For example, our RAG answer can eventually show:
-
-```text
-Source: python.pdf
-Page: 5
-```
-
----
-
-# 4.5 Create Text Splitter
-
-Create:
-
-```text
-app/rag/splitter.py
-```
-
-```python
-from langchain_text_splitters import (
-    RecursiveCharacterTextSplitter
-)
-
-
-def split_documents(documents):
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len,
-    )
-
-    chunks = splitter.split_documents(
-        documents
-    )
-
-    return chunks
-```
-
-We need the splitter package:
-
-```bash
-uv add langchain-text-splitters
-```
-
----
-
-# 4.6 Why Chunking?
-
-Imagine a PDF contains:
-
-```text
-100 pages
-```
-
-We don't want to send the entire PDF to the LLM every time.
+We don't want to send all three PDFs to Groq.
 
 Instead:
 
 ```text
-100-page PDF
-      ↓
-Extract text
-      ↓
-Split into chunks
-      ↓
-Chunk 1
-Chunk 2
-Chunk 3
-...
-Chunk 500
+Question
+   ↓
+"What is dependency injection in FastAPI?"
+   ↓
+Embedding
+   ↓
+Pinecone
+   ↓
+Find similar chunks
+   ↓
+Top 5 chunks
 ```
 
-Later Pinecone will search these chunks.
+For example:
+
+```text
+Chunk 1 → FastAPI dependency injection
+Chunk 2 → Depends()
+Chunk 3 → Dependency functions
+Chunk 4 → Request dependencies
+Chunk 5 → Authentication dependencies
+```
+
+These chunks will become the **context** for the LLM in the next step.
+
+---
+
+# 6.2 Add search function
+
+Open:
+
+```text
+app/rag/vector_store.py
+```
+
+Add:
+
+```python
+def search_chunks(
+    query: str,
+    user_id: int,
+    top_k: int = 5
+):
+    index = get_index()
+
+    # Convert question into vector
+    query_vector = embedding_model.embed_query(query)
+
+    # Search Pinecone
+    results = index.query(
+        vector=query_vector,
+        top_k=top_k,
+        include_metadata=True,
+        filter={
+            "user_id": str(user_id)
+        }
+    )
+
+    return results
+```
+
+The important part is:
+
+```python
+filter={
+    "user_id": str(user_id)
+}
+```
+
+This ensures that users retrieve **only their own documents**.
+
+---
+
+# 6.3 Create search schema
+
+Create:
+
+```text
+app/schemas/search.py
+```
+
+```python
+from pydantic import BaseModel
+
+
+class SearchRequest(BaseModel):
+    query: str
+    top_k: int = 5
+
+
+class SearchResult(BaseModel):
+    text: str
+    score: float
+    document_id: str
+    filename: str | None = None
+    page: int | None = None
+```
+
+---
+
+# 6.4 Create search API
+
+Create:
+
+```text
+app/api/search.py
+```
+
+```python
+from fastapi import APIRouter, Depends
+
+from app.api.auth import get_current_user
+from app.database.models import User
+from app.rag.vector_store import search_chunks
+from app.schemas.search import (
+    SearchRequest,
+    SearchResult
+)
+
+
+router = APIRouter(
+    prefix="/api/search",
+    tags=["Search"]
+)
+
+
+@router.post(
+    "",
+    response_model=list[SearchResult]
+)
+def semantic_search(
+    search_request: SearchRequest,
+    current_user: User = Depends(get_current_user)
+):
+
+    results = search_chunks(
+        query=search_request.query,
+        user_id=current_user.id,
+        top_k=search_request.top_k
+    )
+
+    search_results = []
+
+    for match in results["matches"]:
+
+        metadata = match.get("metadata", {})
+
+        search_results.append(
+            SearchResult(
+                text=metadata.get("text", ""),
+                score=match.get("score", 0),
+                document_id=metadata.get(
+                    "document_id",
+                    ""
+                ),
+                filename=metadata.get(
+                    "filename"
+                ),
+                page=metadata.get(
+                    "page"
+                )
+            )
+        )
+
+    return search_results
+```
+
+---
+
+# 6.5 Add search router to FastAPI
+
+Open:
+
+```text
+app/main.py
+```
+
+Add:
+
+```python
+from app.api.search import router as search_router
+```
+
+Then:
+
+```python
+app.include_router(search_router)
+```
+
+Your `main.py` should now contain:
+
+```python
+from fastapi import FastAPI
+
+from app.api.health import router as health_router
+from app.api.auth import router as auth_router
+from app.api.documents import router as documents_router
+from app.api.search import router as search_router
+
+from app.core.config import APP_NAME, APP_VERSION
+
+from app.database.connection import Base, engine
+from app.database import models
+
+
+Base.metadata.create_all(bind=engine)
+
+
+app = FastAPI(
+    title=APP_NAME,
+    description="RAG Based Document Question Answering System",
+    version=APP_VERSION
+)
+
+
+app.include_router(health_router)
+app.include_router(auth_router)
+app.include_router(documents_router)
+app.include_router(search_router)
+
+
+@app.get("/")
+def root():
+    return {
+        "message": "Document Q&A API is running",
+        "version": APP_VERSION
+    }
+```
+
+---
+
+# 6.6 Important correction: store filename in Pinecone metadata
+
+Our current `store_chunks()` metadata contains:
+
+```python
+metadata = {
+    "user_id": str(user_id),
+    "document_id": str(document_id),
+    "text": text,
+    "source": chunk.metadata.get("source", ""),
+    "page": chunk.metadata.get("page", 0)
+}
+```
+
+We should also store the original filename.
+
+Modify the function.
+
+### `app/rag/vector_store.py`
+
+```python
+def store_chunks(
+    chunks,
+    user_id: int,
+    document_id: int,
+    filename: str
+):
+
+    index = get_index()
+
+    vectors = []
+
+    for chunk in chunks:
+
+        text = chunk.page_content
+
+        vector = embedding_model.embed_query(
+            text
+        )
+
+        metadata = {
+            "user_id": str(user_id),
+            "document_id": str(document_id),
+            "filename": filename,
+            "text": text,
+            "source": chunk.metadata.get(
+                "source",
+                ""
+            ),
+            "page": chunk.metadata.get(
+                "page",
+                0
+            )
+        }
+
+        vectors.append(
+            {
+                "id": str(uuid4()),
+                "values": vector,
+                "metadata": metadata
+            }
+        )
+
+    index.upsert(
+        vectors=vectors
+    )
+
+    return len(vectors)
+```
+
+Then in `documents.py`:
+
+```python
+vector_count = store_chunks(
+    chunks=chunks,
+    user_id=current_user.id,
+    document_id=document.id,
+    filename=document.filename
+)
+```
+
+---
+
+# 6.7 Test semantic search
+
+Start FastAPI:
+
+```bash
+uv run fastapi dev app/main.py
+```
+
+Open:
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+You should see:
+
+```text
+Authentication
+Documents
+Search
+Health
+```
+
+First:
+
+```text
+POST /api/auth/register
+```
+
+Then:
+
+```text
+POST /api/auth/login
+```
+
+Copy the JWT token.
+
+Click:
+
+```text
+Authorize
+```
+
+Enter:
+
+```text
+Bearer YOUR_ACCESS_TOKEN
+```
+
+---
+
+## 6.8 Test `/api/search`
+
+Request:
+
+```json
+{
+    "query": "What is FastAPI?",
+    "top_k": 5
+}
+```
+
+Possible response:
+
+```json
+[
+    {
+        "text": "FastAPI is a modern Python framework...",
+        "score": 0.91,
+        "document_id": "5",
+        "filename": "python.pdf",
+        "page": 12
+    },
+    {
+        "text": "FastAPI provides dependency injection...",
+        "score": 0.87,
+        "document_id": "5",
+        "filename": "python.pdf",
+        "page": 15
+    }
+]
+```
+
+The `score` represents how similar the stored chunk is to the user's question.
+
+---
+
+# 6.9 Understand similarity search
+
+Traditional keyword search:
+
+```text
+Question:
+"What is FastAPI?"
+```
+
+looks for words such as:
+
+```text
+FastAPI
+```
+
+Semantic search instead understands meaning.
 
 For example:
 
 ```text
 Question:
+"What does FastAPI do?"
+```
 
-"What is supervised learning?"
+could retrieve:
 
-              ↓
+```text
+"FastAPI is a Python framework for building APIs."
+```
 
-           Pinecone
+even though the exact words aren't identical.
 
-              ↓
+That's the power of **embeddings + vector search**.
 
-       Relevant chunks
+---
 
-              ↓
+# 6.10 Our RAG architecture so far
 
-Chunk 145
-Chunk 302
-Chunk 411
+We have now completed:
 
-              ↓
-
-            Groq
-
-              ↓
-
-           Answer
+```text
+                    USER
+                     │
+                     ▼
+              ┌─────────────┐
+              │   FastAPI   │
+              └──────┬──────┘
+                     │
+          ┌──────────┴──────────┐
+          │                     │
+          ▼                     ▼
+      Upload                  Search
+          │                     │
+          ▼                     ▼
+   Local Storage          Create Embedding
+          │                     │
+          ▼                     ▼
+    Text Extraction         Pinecone
+          │                     │
+          ▼                     ▼
+       Chunking             Similarity
+          │                   Search
+          ▼                     │
+     Embeddings                │
+          │                     │
+          ▼                     ▼
+       Pinecone          Relevant Chunks
+                                │
+                                ▼
+                         ┌─────────────┐
+                         │  Next: Groq │
+                         └─────────────┘
 ```
 
 ---
 
-# 4.7 Understanding `chunk_size`
+# Step 6 is conceptually very important
 
-We currently use:
+Students should understand:
 
-```python
-chunk_size=1000
-```
+### Supabase
 
-Conceptually:
+Stores:
 
 ```text
-Chunk 1
-────────────────────
-~1000 characters
-────────────────────
-
-Chunk 2
-────────────────────
-~1000 characters
-────────────────────
-```
-
-But we also use:
-
-```python
-chunk_overlap=200
-```
-
-So:
-
-```text
-Chunk 1
-████████████████████
-
-            █████
-            overlap
-
-                ████████████████████
-                Chunk 2
-```
-
-Why overlap?
-
-To avoid losing context between chunks.
-
-For example:
-
-```text
-Chunk 1:
-"Machine learning models learn patterns from data..."
-
-Chunk 2:
-"...patterns from data are then used to make predictions."
-```
-
-The overlap preserves some context.
-
----
-
-# 4.8 Create Document Processor
-
-Create:
-
-```text
-app/services/document_processor.py
-```
-
-```python
-from app.rag.loader import load_document
-from app.rag.splitter import split_documents
-
-
-def process_document(
-    file_path: str
-):
-
-    documents = load_document(
-        file_path
-    )
-
-    chunks = split_documents(
-        documents
-    )
-
-    return chunks
-```
-
-Our processing pipeline is now:
-
-```text
-File
- ↓
-load_document()
- ↓
-LangChain Documents
- ↓
-split_documents()
- ↓
-Chunks
-```
-
----
-
-# 4.9 Test the Processor
-
-Before connecting this to FastAPI, let's test it separately.
-
-Create:
-
-```text
-test_processing.py
-```
-
-in the backend directory:
-
-```python
-from app.services.document_processor import (
-    process_document
-)
-
-
-file_path = "uploads/example.pdf"
-
-
-chunks = process_document(
-    file_path
-)
-
-print(
-    f"Total chunks: {len(chunks)}"
-)
-
-for index, chunk in enumerate(
-    chunks[:5]
-):
-
-    print("\n----------------")
-    print(f"Chunk: {index + 1}")
-    print("----------------")
-
-    print(
-        chunk.page_content[:500]
-    )
-
-    print(
-        "Metadata:",
-        chunk.metadata
-    )
-```
-
-Run:
-
-```bash
-uv run python test_processing.py
-```
-
-Expected:
-
-```text
-Total chunks: 35
-
-----------------
-Chunk: 1
-----------------
-
-Python is a high-level programming
-language...
-
-Metadata:
-{
-    'source': 'uploads/example.pdf',
-    'page': 0
-}
-```
-
----
-
-# 4.10 Connect Processing to Upload
-
-Currently our upload API does:
-
-```text
-Upload
- ↓
-Save file
- ↓
-Save database record
-```
-
-We want:
-
-```text
-Upload
- ↓
-Save file
- ↓
-Save DB record
- ↓
-Process document
- ↓
-Extract text
- ↓
-Create chunks
- ↓
-Update status
-```
-
----
-
-# 4.11 Update Document Status
-
-When a file is first uploaded:
-
-```text
-uploaded
-```
-
-Then:
-
-```text
-processing
-```
-
-Then:
-
-```text
-processed
-```
-
-Later:
-
-```text
-embedded
-```
-
-So the lifecycle becomes:
-
-```text
-uploaded
-    ↓
-processing
-    ↓
-processed
-    ↓
-embedded
-```
-
-This is important in a real application because document processing can take time.
-
----
-
-# 4.12 Update Upload API
-
-In:
-
-```text
-app/api/documents.py
-```
-
-add:
-
-```python
-from app.services.document_processor import (
-    process_document
-)
-```
-
-Then after creating the database record:
-
-```python
-document.status = "processing"
-
-db.commit()
-```
-
-Process:
-
-```python
-try:
-
-    chunks = process_document(
-        file_path
-    )
-
-    document.status = "processed"
-
-    db.commit()
-
-except Exception as e:
-
-    document.status = "failed"
-
-    db.commit()
-
-    raise HTTPException(
-        status_code=500,
-        detail=(
-            f"Document processing failed: {str(e)}"
-        )
-    )
-```
-
----
-
-# 4.13 Complete Processing Flow
-
-Now:
-
-```text
-                    Upload
-                       │
-                       ▼
-                   FastAPI
-                       │
-                       ▼
-                JWT Validation
-                       │
-                       ▼
-                Save Local File
-                       │
-                       ▼
-                Supabase Record
-                       │
-                       ▼
-                   processing
-                       │
-                       ▼
-                  LangChain
-                       │
-              ┌────────┼────────┐
-              ▼        ▼        ▼
-             PDF      DOCX      TXT
-              │        │        │
-              └────────┼────────┘
-                       ▼
-                Extract Text
-                       │
-                       ▼
-                   Chunking
-                       │
-                       ▼
-                   processed
-```
-
----
-
-# 4.14 Important: We Are NOT Sending Chunks to Pinecone Yet
-
-At this point:
-
-```text
-Document
-   ↓
-Text
-   ↓
-Chunks
-```
-
-We stop here.
-
-Next we need:
-
-```text
-Chunks
-   ↓
-Embedding Model
-   ↓
-Vectors
-   ↓
-Pinecone
-```
-
-This separation is important for teaching.
-
----
-
-# 4.15 Store Processing Information
-
-Our current `documents` table has:
-
-```text
-id
-user_id
-filename
-file_path
-file_type
-file_size
-status
-created_at
-```
-
-Eventually we'll add:
-
-```text
-chunk_count
-processing_error
-storage_key
-```
-
-For example:
-
-```text
+users
 documents
-────────────────────────────
-id
-user_id
-filename
-file_path
-file_type
-file_size
-status
-chunk_count
-processing_error
-created_at
+```
+
+### Local Storage
+
+Stores:
+
+```text
+actual PDF/DOCX/TXT files
+```
+
+### Pinecone
+
+Stores:
+
+```text
+chunk
+   +
+embedding
+   +
+metadata
+```
+
+### FastAPI
+
+Connects everything.
+
+---
+
+# Next — Step 7: Groq + LangChain
+
+Now we finally introduce the **LLM**.
+
+The flow will become:
+
+```text
+User Question
+      ↓
+Pinecone Search
+      ↓
+Top 5 Relevant Chunks
+      ↓
+Context
+      ↓
+LangChain Prompt
+      ↓
+Groq LLM
+      ↓
+Final Answer
 ```
 
 Example:
 
 ```text
-id                 1
-user_id            7
-filename           python.pdf
-file_type          .pdf
-file_size          245678
-status             processed
-chunk_count        43
-processing_error   NULL
+User:
+"What is FastAPI?"
 ```
 
-We'll add those fields properly when we introduce migrations.
-
----
-
-# 4.16 The RAG Pipeline Is Taking Shape
-
-We now have the first half:
+Pinecone retrieves:
 
 ```text
-             DOCUMENT INGESTION
-                    │
-                    ▼
-              Upload File
-                    │
-                    ▼
-             Local Storage
-                    │
-                    ▼
-             Text Extraction
-                    │
-                    ▼
-                Chunking
-                    │
-                    ▼
-              ┌───────────┐
-              │   NEXT    │
-              │           │
-              │ Embedding │
-              └─────┬─────┘
-                    │
-                    ▼
-                 Pinecone
+Chunk 1
+Chunk 2
+Chunk 3
 ```
 
-And eventually the query side will be:
+Then LangChain creates:
 
 ```text
-             USER QUESTION
-                    │
-                    ▼
-               FastAPI
-                    │
-                    ▼
-             Create Embedding
-                    │
-                    ▼
-               Pinecone
-                    │
-                    ▼
-             Relevant Chunks
-                    │
-                    ▼
-               LangGraph
-                    │
-                    ▼
-                 Groq
-                    │
-                    ▼
-                 Answer
+Context:
+FastAPI is a Python framework...
+
+Question:
+What is FastAPI?
 ```
 
----
-
-# Step 4 Complete ✅
-
-We now have:
+Groq generates:
 
 ```text
-✅ Supabase PostgreSQL
-✅ User Authentication
-✅ JWT
-✅ Document Upload
-✅ Local Development Storage
-✅ PDF Loader
-✅ DOCX Loader
-✅ TXT Loader
-✅ Text Extraction
-✅ Recursive Chunking
-✅ Processing Status
+FastAPI is a modern Python web framework
+used for building APIs...
 ```
 
-### Next — Step 5: Embeddings + Pinecone
-
-This is where the project becomes a real **vector-based RAG system**:
-
-```text
-Document
-   ↓
-Chunks
-   ↓
-Embedding Model
-   ↓
-Vector
-   ↓
-Pinecone
-```
-
-We'll create a Pinecone index, generate embeddings, store each chunk with metadata such as:
-
-```json
-{
-  "user_id": 1,
-  "document_id": 5,
-  "filename": "python.pdf",
-  "page": 10,
-  "text": "..."
-}
-```
-
-and implement **user-specific vector filtering**, so one student can never retrieve another student's document chunks.
+After that, we'll introduce **LangGraph** and turn these individual steps into a proper production RAG workflow.

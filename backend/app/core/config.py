@@ -52,3 +52,19 @@ PINECONE_INDEX_NAME = os.getenv(
     "PINECONE_INDEX_NAME",
     "document-qa"
 )
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv(
+    "GOOGLE_API_KEY"
+) or os.getenv(
+    "GEMINI_API_KEY"
+)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+DEFAULT_LLM_PROVIDER = os.getenv(
+    "DEFAULT_LLM_PROVIDER",
+    "groq"
+)
+DEFAULT_LLM_MODEL = os.getenv(
+    "DEFAULT_LLM_MODEL",
+    "qwen/qwen3.8-27b"
+)   
