@@ -84,7 +84,7 @@ def login_user(
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError
 from jose import jwt
-
+from app.core.config import JWT_ALGORITHM,JWT_SECRET_KEY
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 def get_current_user(
@@ -129,3 +129,16 @@ def get_current_user(
         raise credentials_exception
 
     return user
+
+# /me API get the current user details
+@router.get(
+    "/me",
+    response_model=UserResponse
+)
+def get_me(
+    current_user: User = Depends(
+        get_current_user
+    )
+):
+
+    return current_user
