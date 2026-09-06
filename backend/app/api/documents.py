@@ -13,7 +13,7 @@ from app.database.models import Document
 from app.database.models import User
 from app.schemas.document import DocumentResponse
 from app.services.storage.local_storage import save_file
-
+from app.services.document_processor import (process_document)
 
 router = APIRouter(
     prefix="/api/documents",
@@ -67,9 +67,33 @@ def upload_document(
     )
 
     db.add(document)
+    document.status = "processing"
 
     db.commit()
 
     db.refresh(document)
+
+    try:
+
+        chunks = process_document(
+            document.file_path
+        )
+
+        document.status = "processed"
+
+        db.commit()
+
+    except Exception as e:
+
+        document.status = "failed"
+
+        db.commit()
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Document processing failed: {str(e)}"
+            )
+        )
 
     return document

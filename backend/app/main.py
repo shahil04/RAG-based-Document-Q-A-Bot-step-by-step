@@ -42,7 +42,7 @@ app.include_router(
 app.include_router(
     documents_router
 )
-
+    
 @app.get("/")
 def root():
 
