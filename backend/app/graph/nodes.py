@@ -25,71 +25,23 @@ def content_to_text(content) -> str:
 
 def retrieve_node(state):
 
-    question = state["question"]
+    question = state.get(
+        "rewritten_question",
+        state["question"]
+    )
+
     user_id = state["user_id"]
-    top_k = state.get("top_k", 5)
+
+    top_k = state.get(
+        "top_k",
+        5
+    )
 
     results = search_chunks(
         query=question,
         user_id=user_id,
         top_k=top_k
     )
-
-    matches = results.get(
-        "matches",
-        []
-    )
-
-    retrieved_chunks = []
-    sources = []
-
-    for match in matches:
-
-        metadata = match.get(
-            "metadata",
-            {}
-        )
-
-        retrieved_chunks.append({
-            "text": metadata.get(
-                "text",
-                ""
-            ),
-            "score": match.get(
-                "score",
-                0
-            ),
-            "document_id": metadata.get(
-                "document_id"
-            ),
-            "filename": metadata.get(
-                "filename"
-            ),
-            "page": metadata.get(
-                "page"
-            )
-        })
-
-        sources.append({
-            "document_id": metadata.get(
-                "document_id"
-            ),
-            "filename": metadata.get(
-                "filename"
-            ),
-            "page": metadata.get(
-                "page"
-            ),
-            "score": match.get(
-                "score",
-                0
-            )
-        })
-
-    return {
-        "retrieved_chunks": retrieved_chunks,
-        "sources": sources
-    }
 
 
 def build_context_node(state):
@@ -242,3 +194,163 @@ def load_history_node(state):
     finally:
 
         db.close()
+
+
+def rewrite_query_node(state):
+
+    question = state["question"]
+
+    chat_history = state.get(
+        "chat_history",
+        []
+    )
+
+    # If there is no conversation history,
+    # no rewriting is necessary.
+    if not chat_history:
+
+        return {
+            "rewritten_question": question
+        }
+
+    provider = state.get(
+        "provider",
+        "groq"
+    )
+
+    model = state.get(
+        "model"
+    )
+
+    temperature = state.get(
+        "temperature",
+        0
+    )
+
+    llm = get_llm(
+        provider=provider,
+        model=model,
+        temperature=temperature
+    )
+
+    history_text = ""
+
+    for message in chat_history:
+
+        history_text += (
+            f"{message['role']}: "
+            f"{message['content']}\n"
+        )
+
+    prompt = f"""
+You are a search query rewriting assistant.
+
+Rewrite the user's current question so that
+it can be understood independently.
+
+Use the conversation history to resolve
+references such as:
+
+- it
+- this
+- that
+- they
+- them
+- its
+- the above
+
+Do not answer the question.
+
+Return ONLY the rewritten search query.
+
+Conversation:
+----------------
+{history_text}
+----------------
+
+Current Question:
+{question}
+
+Rewritten Query:
+"""
+
+    response = llm.invoke(prompt)
+
+    rewritten_question = (
+        response.content.strip()
+    )
+
+    return {
+        "rewritten_question": rewritten_question
+    }
+
+def check_relevance_node(state):
+
+    question = state.get(
+        "rewritten_question",
+        state["question"]
+    )
+
+    context = state.get(
+        "context",
+        ""
+    )
+
+    if not context:
+
+        return {
+            "is_relevant": False
+        }
+
+    provider = state.get(
+        "provider",
+        "groq"
+    )
+
+    model = state.get(
+        "model"
+    )
+
+    llm = get_llm(
+        provider=provider,
+        model=model,
+        temperature=0
+    )
+
+    prompt = f"""
+You are a document relevance evaluator.
+
+Determine whether the provided context
+contains information that can help answer
+the question.
+
+Return ONLY one word:
+
+YES
+
+or
+
+NO
+
+Question:
+----------------
+{question}
+
+Context:
+----------------
+{context}
+
+Decision:
+"""
+
+    response = llm.invoke(prompt)
+
+    decision = (
+        response.content
+        .strip()
+        .upper()
+    )
+
+    return {
+        "is_relevant": decision == "YES"
+    }

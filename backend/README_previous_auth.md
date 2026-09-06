@@ -4748,3 +4748,2161 @@ LangGraph
 [2]: https://docs.langchain.com/oss/python/integrations/chat/groq?utm_source=chatgpt.com "ChatGroq integration - Docs by LangChain"
 [3]: https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai?utm_source=chatgpt.com "ChatGoogleGenerativeAI integration - Docs by LangChain"
 [4]: https://docs.langchain.com/oss/python/integrations/chat/anthropic?utm_source=chatgpt.com "ChatAnthropic integration - Docs by LangChain"
+
+
+
+
+# Step 8 — LangGraph RAG Workflow
+
+Now we'll convert our current RAG logic into a **LangGraph workflow**.
+
+Instead of:
+
+```text
+FastAPI
+   ↓
+Search
+   ↓
+Prompt
+   ↓
+LLM
+```
+
+we'll build:
+
+```text
+FastAPI
+   ↓
+LangGraph
+   │
+   ├── Retrieve
+   │
+   ├── Build Context
+   │
+   ├── Generate Answer
+   │
+   └── Return Response
+```
+
+This gives us a proper foundation for adding things later like:
+
+* query rewriting
+* document relevance checking
+* web search fallback
+* multiple LLM providers
+* conversation memory
+* answer validation
+* retry/fallback
+* streaming
+
+---
+
+## 8.1 Install LangGraph
+
+From `backend/`:
+
+```bash
+uv add langgraph
+```
+
+We already have LangChain installed.
+
+---
+
+# 8.2 Create the graph structure
+
+Change:
+
+```text
+app/
+└── graph/
+    └── __init__.py
+```
+
+to:
+
+```text
+app/
+└── graph/
+    ├── __init__.py
+    ├── state.py
+    ├── nodes.py
+    └── workflow.py
+```
+
+---
+
+# 8.3 Create Graph State
+
+Create:
+
+### `app/graph/state.py`
+
+```python
+from typing import TypedDict
+
+
+class RAGState(TypedDict, total=False):
+
+    # User information
+    user_id: int
+
+    # User question
+    question: str
+
+    # Retrieval configuration
+    top_k: int
+
+    # LLM configuration
+    provider: str
+    model: str | None
+    temperature: float
+
+    # Retrieved Pinecone results
+    retrieved_chunks: list
+
+    # Combined context
+    context: str
+
+    # Final answer
+    answer: str
+
+    # Source information
+    sources: list
+```
+
+Think of `RAGState` as a **shared notebook** between LangGraph nodes.
+
+For example:
+
+```text
+State
+│
+├── question
+├── user_id
+├── retrieved_chunks
+├── context
+├── answer
+└── sources
+```
+
+Each node reads some information and adds/updates information.
+
+---
+
+# 8.4 Create Retrieval Node
+
+Create:
+
+### `app/graph/nodes.py`
+
+```python
+from app.rag.vector_store import search_chunks
+from app.llm.factory import get_llm
+
+
+def retrieve_node(state):
+
+    question = state["question"]
+    user_id = state["user_id"]
+    top_k = state.get("top_k", 5)
+
+    results = search_chunks(
+        query=question,
+        user_id=user_id,
+        top_k=top_k
+    )
+
+    matches = results.get(
+        "matches",
+        []
+    )
+
+    retrieved_chunks = []
+    sources = []
+
+    for match in matches:
+
+        metadata = match.get(
+            "metadata",
+            {}
+        )
+
+        retrieved_chunks.append({
+            "text": metadata.get(
+                "text",
+                ""
+            ),
+            "score": match.get(
+                "score",
+                0
+            ),
+            "document_id": metadata.get(
+                "document_id"
+            ),
+            "filename": metadata.get(
+                "filename"
+            ),
+            "page": metadata.get(
+                "page"
+            )
+        })
+
+        sources.append({
+            "document_id": metadata.get(
+                "document_id"
+            ),
+            "filename": metadata.get(
+                "filename"
+            ),
+            "page": metadata.get(
+                "page"
+            ),
+            "score": match.get(
+                "score",
+                0
+            )
+        })
+
+    return {
+        "retrieved_chunks": retrieved_chunks,
+        "sources": sources
+    }
+```
+
+---
+
+# 8.5 Create Context Node
+
+Add to the same file:
+
+```python
+def build_context_node(state):
+
+    retrieved_chunks = state.get(
+        "retrieved_chunks",
+        []
+    )
+
+    context_parts = []
+
+    for index, chunk in enumerate(
+        retrieved_chunks,
+        start=1
+    ):
+
+        text = chunk.get(
+            "text",
+            ""
+        )
+
+        context_parts.append(
+            f"[Context {index}]\n{text}"
+        )
+
+    context = "\n\n".join(
+        context_parts
+    )
+
+    return {
+        "context": context
+    }
+```
+
+Now:
+
+```text
+Pinecone
+   ↓
+5 chunks
+   ↓
+Context Node
+   ↓
+one context string
+```
+
+---
+
+# 8.6 Create LLM Generation Node
+
+Add:
+
+```python
+def generate_answer_node(state):
+
+    question = state["question"]
+
+    context = state.get(
+        "context",
+        ""
+    )
+
+    provider = state.get(
+        "provider",
+        "groq"
+    )
+
+    model = state.get(
+        "model"
+    )
+
+    temperature = state.get(
+        "temperature",
+        0.2
+    )
+
+    llm = get_llm(
+        provider=provider,
+        model=model,
+        temperature=temperature
+    )
+
+    prompt = f"""
+You are a helpful document question-answering assistant.
+
+Your job is to answer the user's question
+using ONLY the supplied document context.
+
+Rules:
+
+1. Do not invent information.
+2. Do not use outside knowledge.
+3. If the answer is not present in the context,
+   clearly say that you could not find the answer
+   in the uploaded documents.
+4. Give a clear and concise answer.
+
+Document Context:
+========================
+
+{context}
+
+========================
+
+User Question:
+{question}
+
+Answer:
+"""
+
+    response = llm.invoke(prompt)
+
+    return {
+        "answer": response.content
+    }
+```
+
+---
+
+# 8.7 Our nodes
+
+We now have three nodes:
+
+```text
+retrieve_node
+      ↓
+build_context_node
+      ↓
+generate_answer_node
+```
+
+Conceptually:
+
+```text
+             Question
+                 │
+                 ▼
+        ┌─────────────────┐
+        │    Retrieve     │
+        │    Pinecone     │
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Build Context   │
+        └────────┬────────┘
+                 │
+                 ▼
+        ┌─────────────────┐
+        │ Generate Answer │
+        │   Groq/OpenAI   │
+        │ Gemini/Claude   │
+        └────────┬────────┘
+                 │
+                 ▼
+               Answer
+```
+
+---
+
+# 8.8 Create LangGraph Workflow
+
+Create:
+
+### `app/graph/workflow.py`
+
+```python
+from langgraph.graph import (
+    StateGraph,
+    START,
+    END,
+)
+
+from app.graph.state import RAGState
+
+from app.graph.nodes import (
+    retrieve_node,
+    build_context_node,
+    generate_answer_node,
+)
+
+
+def create_rag_graph():
+
+    graph = StateGraph(RAGState)
+
+    # Add nodes
+    graph.add_node(
+        "retrieve",
+        retrieve_node
+    )
+
+    graph.add_node(
+        "build_context",
+        build_context_node
+    )
+
+    graph.add_node(
+        "generate_answer",
+        generate_answer_node
+    )
+
+    # Define workflow
+    graph.add_edge(
+        START,
+        "retrieve"
+    )
+
+    graph.add_edge(
+        "retrieve",
+        "build_context"
+    )
+
+    graph.add_edge(
+        "build_context",
+        "generate_answer"
+    )
+
+    graph.add_edge(
+        "generate_answer",
+        END
+    )
+
+    return graph.compile()
+```
+
+---
+
+# 8.9 Understand `StateGraph`
+
+This:
+
+```python
+graph = StateGraph(RAGState)
+```
+
+means:
+
+> Create a workflow whose shared state follows `RAGState`.
+
+Then:
+
+```python
+graph.add_node(
+    "retrieve",
+    retrieve_node
+)
+```
+
+means:
+
+```text
+Node Name       Function
+
+retrieve   →    retrieve_node()
+```
+
+Then:
+
+```python
+graph.add_edge(
+    START,
+    "retrieve"
+)
+```
+
+means:
+
+```text
+START → retrieve
+```
+
+And:
+
+```python
+graph.add_edge(
+    "retrieve",
+    "build_context"
+)
+```
+
+means:
+
+```text
+retrieve → build_context
+```
+
+Finally:
+
+```python
+graph.add_edge(
+    "generate_answer",
+    END
+)
+```
+
+means:
+
+```text
+generate_answer → END
+```
+
+---
+
+# 8.10 Test the LangGraph independently
+
+Create:
+
+```text
+backend/
+└── test_graph.py
+```
+
+```python
+from app.graph.workflow import create_rag_graph
+
+
+graph = create_rag_graph()
+
+
+result = graph.invoke({
+
+    "user_id": 1,
+
+    "question": "What is FastAPI?",
+
+    "top_k": 5,
+
+    "provider": "groq",
+
+    "model": "qwen/qwen3-32b",
+
+    "temperature": 0.2
+
+})
+
+
+print("\n====================")
+print("ANSWER")
+print("====================")
+
+print(result["answer"])
+
+
+print("\n====================")
+print("SOURCES")
+print("====================")
+
+for source in result["sources"]:
+    print(source)
+```
+
+Run:
+
+```bash
+uv run python test_graph.py
+```
+
+Expected:
+
+```text
+====================
+ANSWER
+====================
+
+FastAPI is a modern Python web framework
+used for building APIs...
+
+====================
+SOURCES
+====================
+
+{'document_id': '5',
+ 'filename': 'python.pdf',
+ 'page': 12,
+ 'score': 0.91}
+```
+
+---
+
+# 8.11 Now simplify `chat.py`
+
+This is where LangGraph becomes useful.
+
+Our old `chat.py` contained:
+
+```text
+Retrieval
+Context creation
+LLM selection
+Prompt
+LLM invocation
+Response
+```
+
+We can now make the API much cleaner.
+
+Replace the main logic with:
+
+### `app/api/chat.py`
+
+```python
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.api.auth import get_current_user
+from app.database.models import User
+
+from app.graph.workflow import create_rag_graph
+
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse
+)
+
+
+router = APIRouter(
+    prefix="/api/chat",
+    tags=["Chat"]
+)
+
+
+rag_graph = create_rag_graph()
+
+
+@router.post(
+    "",
+    response_model=ChatResponse
+)
+def chat(
+    request: ChatRequest,
+    current_user: User = Depends(
+        get_current_user
+    )
+):
+
+    try:
+
+        result = rag_graph.invoke({
+
+            "user_id": current_user.id,
+
+            "question": request.question,
+
+            "top_k": request.top_k,
+
+            "provider": request.provider or "groq",
+
+            "model": request.model,
+
+            "temperature": request.temperature
+
+        })
+
+    except Exception as e:
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"RAG processing failed: {str(e)}"
+        )
+
+    if not result.get("answer"):
+
+        raise HTTPException(
+            status_code=500,
+            detail="Could not generate an answer"
+        )
+
+    return ChatResponse(
+
+        answer=result["answer"],
+
+        provider=request.provider or "groq",
+
+        model=request.model or "default",
+
+        sources=result.get(
+            "sources",
+            []
+        )
+    )
+```
+
+Now the API is responsible only for:
+
+```text
+HTTP request
+     ↓
+Authentication
+     ↓
+LangGraph
+     ↓
+HTTP response
+```
+
+That's much cleaner.
+
+---
+
+# 8.12 Our complete backend architecture
+
+We now have:
+
+```text
+document-qa-bot/
+│
+└── backend/
+    │
+    ├── app/
+    │
+    ├── api/
+    │   ├── auth.py
+    │   ├── documents.py
+    │   ├── search.py
+    │   └── chat.py
+    │
+    ├── core/
+    │   ├── config.py
+    │   └── security.py
+    │
+    ├── database/
+    │   ├── connection.py
+    │   └── models.py
+    │
+    ├── schemas/
+    │   ├── auth.py
+    │   ├── document.py
+    │   ├── search.py
+    │   └── chat.py
+    │
+    ├── services/
+    │   ├── document_processor.py
+    │   └── storage/
+    │       └── local_storage.py
+    │
+    ├── rag/
+    │   ├── loader.py
+    │   ├── splitter.py
+    │   ├── embeddings.py
+    │   └── vector_store.py
+    │
+    ├── llm/
+    │   ├── factory.py
+    │   └── providers.py
+    │
+    └── graph/
+        ├── state.py
+        ├── nodes.py
+        └── workflow.py
+```
+
+---
+
+# 8.13 The complete RAG flow
+
+We have now built:
+
+```text
+                    React
+                      │
+                      ▼
+                   FastAPI
+                      │
+              ┌───────┴────────┐
+              │                │
+              ▼                ▼
+          Register           Login
+              │                │
+              └───────┬────────┘
+                      ▼
+                     JWT
+                      │
+                      ▼
+                Upload Document
+                      │
+          ┌───────────┴───────────┐
+          ▼                       ▼
+    Local Storage             Supabase
+          │                    PostgreSQL
+          ▼
+    Text Extraction
+          │
+          ▼
+       Chunking
+          │
+          ▼
+      Embeddings
+          │
+          ▼
+       Pinecone
+```
+
+Then when the user asks:
+
+```text
+"What is FastAPI?"
+```
+
+we have:
+
+```text
+                     Question
+                         │
+                         ▼
+                    FastAPI API
+                         │
+                         ▼
+                    LangGraph
+                         │
+                         ▼
+                    Retrieve
+                         │
+                         ▼
+                     Pinecone
+                         │
+                         ▼
+                  Relevant Chunks
+                         │
+                         ▼
+                  Build Context
+                         │
+                         ▼
+                   LLM Factory
+                         │
+       ┌─────────────────┼─────────────────┐
+       ▼                 ▼                 ▼
+     Groq              OpenAI            Gemini
+       │                 │                 │
+       └─────────────────┼─────────────────┘
+                         ▼
+                  Generate Answer
+                         │
+                         ▼
+                    FastAPI
+                         │
+                         ▼
+                       React
+```
+
+---
+
+# 8.14 Why LangGraph is useful now
+
+Currently our graph is simple:
+
+```text
+START
+  ↓
+Retrieve
+  ↓
+Context
+  ↓
+Generate
+  ↓
+END
+```
+
+But later we can make it intelligent:
+
+```text
+                         START
+                           │
+                           ▼
+                       Retrieve
+                           │
+                           ▼
+                   Relevant enough?
+                    /           \
+                  YES            NO
+                   │              │
+                   ▼              ▼
+             Generate       Rewrite Query
+                   │              │
+                   │              ▼
+                   │           Retrieve
+                   │              │
+                   └──────┬───────┘
+                          ▼
+                    Validate Answer
+                          │
+                    ┌─────┴─────┐
+                    ▼           ▼
+                  Good        Bad
+                    │           │
+                    ▼           ▼
+                   END        Retry
+```
+
+That is where LangGraph becomes significantly more powerful than simply calling an LLM.
+
+---
+
+## Next Step — Step 9: Chat History + Conversation Memory
+
+At the moment:
+
+```text
+Question 1
+   ↓
+Answer 1
+
+Question 2
+   ↓
+Answer 2
+```
+
+The system doesn't remember Question 1.
+
+We'll next add:
+
+```text
+Supabase PostgreSQL
+
+users
+documents
+chat_sessions
+chat_messages
+```
+
+so the conversation becomes:
+
+```text
+User:
+"What is FastAPI?"
+
+AI:
+"FastAPI is..."
+
+User:
+"Who created it?"
+
+AI:
+"Sebastián Ramírez..."
+
+User:
+"What year?"
+
+AI:
+"FastAPI was initially released in 2018..."
+```
+
+And we'll connect that history to **LangGraph state**, while keeping the database as the persistent source of truth.
+
+
+# Step 9 — Chat History + Conversation Memory
+
+Now we make our Document Q&A Bot behave like a real chat application.
+
+Currently:
+
+```text
+Question 1 → Answer 1
+Question 2 → Answer 2
+```
+
+The second question doesn't know what the user said previously.
+
+We'll change it to:
+
+```text
+Question 1
+   ↓
+Answer 1
+   ↓
+Question 2
+   ↓
+Previous conversation + Question 2
+   ↓
+Answer 2
+```
+
+And we'll store the conversation in **Supabase PostgreSQL**.
+
+---
+
+# 9.1 Database design
+
+We'll add two tables:
+
+```text
+users
+  │
+  └── chat_sessions
+          │
+          └── chat_messages
+```
+
+Conceptually:
+
+```text
+users
+────────────────
+id
+name
+email
+password_hash
+created_at
+
+
+chat_sessions
+────────────────
+id
+user_id
+title
+created_at
+
+
+chat_messages
+────────────────
+id
+session_id
+role
+content
+created_at
+```
+
+Relationship:
+
+```text
+User
+ │
+ │ 1
+ │
+ │ many
+ ▼
+ChatSession
+ │
+ │ 1
+ │
+ │ many
+ ▼
+ChatMessage
+```
+
+---
+
+# 9.2 Update database models
+
+Open:
+
+```text
+app/database/models.py
+```
+
+Add:
+
+```python
+from sqlalchemy import (
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+)
+
+from sqlalchemy.orm import relationship
+
+from sqlalchemy.sql import func
+
+from app.database.connection import Base
+```
+
+Then add these models below `Document`.
+
+```python
+class ChatSession(Base):
+
+    __tablename__ = "chat_sessions"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True
+    )
+
+    user_id = Column(
+        Integer,
+        ForeignKey("users.id"),
+        nullable=False,
+        index=True
+    )
+
+    title = Column(
+        String(255),
+        nullable=True
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    messages = relationship(
+        "ChatMessage",
+        back_populates="session",
+        cascade="all, delete-orphan"
+    )
+```
+
+Now the message model:
+
+```python
+class ChatMessage(Base):
+
+    __tablename__ = "chat_messages"
+
+    id = Column(
+        Integer,
+        primary_key=True,
+        index=True
+    )
+
+    session_id = Column(
+        Integer,
+        ForeignKey(
+            "chat_sessions.id"
+        ),
+        nullable=False,
+        index=True
+    )
+
+    role = Column(
+        String(20),
+        nullable=False
+    )
+
+    content = Column(
+        Text,
+        nullable=False
+    )
+
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    session = relationship(
+        "ChatSession",
+        back_populates="messages"
+    )
+```
+
+---
+
+# 9.3 Why `role`?
+
+Each message needs to tell us who produced it.
+
+We'll use:
+
+```text
+user
+assistant
+```
+
+Example:
+
+```text
+chat_messages
+
+id | session_id | role      | content
+---|------------|-----------|--------------------
+1  | 10         | user      | What is FastAPI?
+2  | 10         | assistant | FastAPI is...
+3  | 10         | user      | Why use it?
+4  | 10         | assistant | It is useful because...
+```
+
+This is exactly what we'll eventually send to the LLM as conversation history.
+
+---
+
+# 9.4 Important database migration point
+
+Because your application currently uses:
+
+```python
+Base.metadata.create_all(
+    bind=engine
+)
+```
+
+new tables can be created automatically during development.
+
+Restart:
+
+```bash
+uv run fastapi dev app/main.py
+```
+
+You should now see these tables in Supabase:
+
+```text
+users
+documents
+chat_sessions
+chat_messages
+```
+
+For production, we'll later replace `create_all()` with **Alembic migrations**.
+
+---
+
+# 9.5 Create Chat Session schemas
+
+Create:
+
+```text
+app/schemas/chat_session.py
+```
+
+```python
+from datetime import datetime
+
+from pydantic import BaseModel
+
+
+class ChatSessionCreate(BaseModel):
+
+    title: str | None = None
+
+
+class ChatSessionResponse(BaseModel):
+
+    id: int
+    title: str | None
+    created_at: datetime
+
+    model_config = {
+        "from_attributes": True
+    }
+```
+
+---
+
+# 9.6 Create Chat Session API
+
+Create:
+
+```text
+app/api/chat_sessions.py
+```
+
+```python
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+)
+
+from sqlalchemy.orm import Session
+
+from app.api.auth import get_current_user
+from app.database.connection import get_db
+
+from app.database.models import (
+    User,
+    ChatSession,
+)
+
+from app.schemas.chat_session import (
+    ChatSessionCreate,
+    ChatSessionResponse,
+)
+
+
+router = APIRouter(
+    prefix="/api/chat/sessions",
+    tags=["Chat Sessions"]
+)
+
+
+@router.post(
+    "",
+    response_model=ChatSessionResponse
+)
+def create_session(
+    session_data: ChatSessionCreate,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(get_db),
+):
+
+    session = ChatSession(
+        user_id=current_user.id,
+        title=session_data.title
+    )
+
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    return session
+```
+
+---
+
+# 9.7 Get user's chat sessions
+
+Add to the same file:
+
+```python
+@router.get(
+    "",
+    response_model=list[ChatSessionResponse]
+)
+def get_sessions(
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(get_db),
+):
+
+    sessions = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.user_id
+            == current_user.id
+        )
+        .order_by(
+            ChatSession.created_at.desc()
+        )
+        .all()
+    )
+
+    return sessions
+```
+
+Notice:
+
+```python
+ChatSession.user_id == current_user.id
+```
+
+Again, this is important for multi-user security.
+
+Student A should never see Student B's chat sessions.
+
+---
+
+# 9.8 Get conversation history
+
+Add:
+
+```python
+from app.database.models import (
+    User,
+    ChatSession,
+    ChatMessage,
+)
+```
+
+Then:
+
+```python
+@router.get(
+    "/{session_id}/messages"
+)
+def get_messages(
+    session_id: int,
+    current_user: User = Depends(
+        get_current_user
+    ),
+    db: Session = Depends(get_db),
+):
+
+    session = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.id == session_id,
+            ChatSession.user_id
+            == current_user.id
+        )
+        .first()
+    )
+
+    if not session:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat session not found"
+        )
+
+    messages = (
+        db.query(ChatMessage)
+        .filter(
+            ChatMessage.session_id
+            == session_id
+        )
+        .order_by(
+            ChatMessage.created_at.asc()
+        )
+        .all()
+    )
+
+    return messages
+```
+
+Now React can request:
+
+```http
+GET /api/chat/sessions/10/messages
+```
+
+and receive:
+
+```json
+[
+    {
+        "role": "user",
+        "content": "What is FastAPI?"
+    },
+    {
+        "role": "assistant",
+        "content": "FastAPI is..."
+    }
+]
+```
+
+---
+
+# 9.9 Register the router
+
+Open:
+
+```text
+app/main.py
+```
+
+Add:
+
+```python
+from app.api.chat_sessions import (
+    router as chat_sessions_router
+)
+```
+
+Then:
+
+```python
+app.include_router(
+    chat_sessions_router
+)
+```
+
+Your API structure is now:
+
+```text
+/api/auth
+/api/documents
+/api/search
+/api/chat
+/api/chat/sessions
+```
+
+---
+
+# 9.10 Update ChatRequest
+
+Now we need to tell the chat API which conversation we're using.
+
+Open:
+
+```text
+app/schemas/chat.py
+```
+
+Change:
+
+```python
+class ChatRequest(BaseModel):
+
+    question: str = Field(
+        ...,
+        min_length=1
+    )
+
+    session_id: int | None = None
+
+    provider: str | None = None
+
+    model: str | None = None
+
+    temperature: float = Field(
+        default=0.2,
+        ge=0,
+        le=2
+    )
+
+    top_k: int = Field(
+        default=5,
+        ge=1,
+        le=20
+    )
+```
+
+Now the request can be:
+
+```json
+{
+    "session_id": 10,
+    "question": "What is FastAPI?",
+    "provider": "groq",
+    "model": "qwen/qwen3-32b",
+    "temperature": 0.2,
+    "top_k": 5
+}
+```
+
+---
+
+# 9.11 Add conversation history to LangGraph State
+
+Open:
+
+```text
+app/graph/state.py
+```
+
+Update:
+
+```python
+from typing import TypedDict
+
+
+class RAGState(TypedDict, total=False):
+
+    user_id: int
+
+    session_id: int
+
+    question: str
+
+    top_k: int
+
+    provider: str
+
+    model: str | None
+
+    temperature: float
+
+    chat_history: list
+
+    retrieved_chunks: list
+
+    context: str
+
+    answer: str
+
+    sources: list
+```
+
+We have added:
+
+```python
+chat_history: list
+```
+
+Now LangGraph knows about previous messages.
+
+---
+
+# 9.12 Create History Node
+
+Open:
+
+```text
+app/graph/nodes.py
+```
+
+Add:
+
+```python
+from app.database.connection import SessionLocal
+
+from app.database.models import (
+    ChatMessage,
+)
+
+
+def load_history_node(state):
+
+    session_id = state.get(
+        "session_id"
+    )
+
+    if not session_id:
+
+        return {
+            "chat_history": []
+        }
+
+    db = SessionLocal()
+
+    try:
+
+        messages = (
+            db.query(ChatMessage)
+            .filter(
+                ChatMessage.session_id
+                == session_id
+            )
+            .order_by(
+                ChatMessage.created_at.asc()
+            )
+            .all()
+        )
+
+        history = []
+
+        for message in messages:
+
+            history.append({
+                "role": message.role,
+                "content": message.content
+            })
+
+        return {
+            "chat_history": history
+        }
+
+    finally:
+
+        db.close()
+```
+
+---
+
+# 9.13 Update the Graph
+
+Our workflow was:
+
+```text
+START
+  ↓
+Retrieve
+  ↓
+Build Context
+  ↓
+Generate
+  ↓
+END
+```
+
+Now:
+
+```text
+START
+  ↓
+Load History
+  ↓
+Retrieve
+  ↓
+Build Context
+  ↓
+Generate
+  ↓
+END
+```
+
+Open:
+
+```text
+app/graph/workflow.py
+```
+
+Change it to:
+
+```python
+from langgraph.graph import (
+    StateGraph,
+    START,
+    END,
+)
+
+from app.graph.state import RAGState
+
+from app.graph.nodes import (
+    load_history_node,
+    retrieve_node,
+    build_context_node,
+    generate_answer_node,
+)
+
+
+def create_rag_graph():
+
+    graph = StateGraph(RAGState)
+
+    graph.add_node(
+        "load_history",
+        load_history_node
+    )
+
+    graph.add_node(
+        "retrieve",
+        retrieve_node
+    )
+
+    graph.add_node(
+        "build_context",
+        build_context_node
+    )
+
+    graph.add_node(
+        "generate_answer",
+        generate_answer_node
+    )
+
+    graph.add_edge(
+        START,
+        "load_history"
+    )
+
+    graph.add_edge(
+        "load_history",
+        "retrieve"
+    )
+
+    graph.add_edge(
+        "retrieve",
+        "build_context"
+    )
+
+    graph.add_edge(
+        "build_context",
+        "generate_answer"
+    )
+
+    graph.add_edge(
+        "generate_answer",
+        END
+    )
+
+    return graph.compile()
+```
+
+---
+
+# 9.14 Use history in the LLM
+
+Now modify:
+
+```text
+generate_answer_node()
+```
+
+We want the LLM to see previous conversation.
+
+```python
+def generate_answer_node(state):
+
+    question = state["question"]
+
+    context = state.get(
+        "context",
+        ""
+    )
+
+    chat_history = state.get(
+        "chat_history",
+        []
+    )
+
+    provider = state.get(
+        "provider",
+        "groq"
+    )
+
+    model = state.get(
+        "model"
+    )
+
+    temperature = state.get(
+        "temperature",
+        0.2
+    )
+
+    llm = get_llm(
+        provider=provider,
+        model=model,
+        temperature=temperature
+    )
+
+    history_text = ""
+
+    for message in chat_history:
+
+        history_text += (
+            f"{message['role']}: "
+            f"{message['content']}\n"
+        )
+
+    prompt = f"""
+You are a helpful document
+question-answering assistant.
+
+Answer using the supplied document context.
+
+Do not invent information.
+
+If the answer is not available in the
+documents, say that you could not find
+the answer in the uploaded documents.
+
+Previous Conversation:
+========================
+{history_text}
+========================
+
+Document Context:
+========================
+{context}
+========================
+
+Current Question:
+{question}
+
+Answer:
+"""
+
+    response = llm.invoke(prompt)
+
+    return {
+        "answer": response.content
+    }
+```
+
+Now the LLM gets:
+
+```text
+Previous Conversation
+        +
+Document Context
+        +
+Current Question
+```
+
+---
+
+# 9.15 Save messages to PostgreSQL
+
+We also need to save the current question and answer.
+
+Open:
+
+```text
+app/api/chat.py
+```
+
+Import:
+
+```python
+from app.database.models import (
+    User,
+    ChatSession,
+    ChatMessage,
+)
+```
+
+Then after the graph returns its answer:
+
+```python
+session_id = request.session_id
+```
+
+If there isn't a session, create one:
+
+```python
+if session_id:
+
+    session = (
+        db.query(ChatSession)
+        .filter(
+            ChatSession.id == session_id,
+            ChatSession.user_id
+            == current_user.id
+        )
+        .first()
+    )
+
+    if not session:
+
+        raise HTTPException(
+            status_code=404,
+            detail="Chat session not found"
+        )
+
+else:
+
+    session = ChatSession(
+        user_id=current_user.id,
+        title=request.question[:100]
+    )
+
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+
+    session_id = session.id
+```
+
+Then save the user message:
+
+```python
+user_message = ChatMessage(
+    session_id=session_id,
+    role="user",
+    content=request.question
+)
+
+db.add(user_message)
+```
+
+And save the AI response:
+
+```python
+assistant_message = ChatMessage(
+    session_id=session_id,
+    role="assistant",
+    content=result["answer"]
+)
+
+db.add(assistant_message)
+
+db.commit()
+```
+
+---
+
+# 9.16 Updated Chat API flow
+
+Your `/api/chat` now works like this:
+
+```text
+POST /api/chat
+       │
+       ▼
+Validate JWT
+       │
+       ▼
+Check Chat Session
+       │
+       ▼
+Save User Question
+       │
+       ▼
+     LangGraph
+       │
+       ├── Load History
+       │
+       ├── Retrieve Pinecone
+       │
+       ├── Build Context
+       │
+       └── Generate Answer
+               │
+               ▼
+         Groq/OpenAI/Gemini/
+            Claude/etc.
+               │
+               ▼
+         Save AI Answer
+               │
+               ▼
+            Response
+```
+
+---
+
+# 9.17 Very important: conversation history vs RAG
+
+Students often confuse these two.
+
+### Conversation memory
+
+Stored in:
+
+```text
+Supabase PostgreSQL
+```
+
+Example:
+
+```text
+"What is FastAPI?"
+"Why is it used?"
+"Give me an example."
+```
+
+### Knowledge
+
+Stored in:
+
+```text
+Pinecone
+```
+
+Example:
+
+```text
+python.pdf
+fastapi.pdf
+rag.pdf
+```
+
+So:
+
+```text
+                 RAG
+                  │
+       ┌──────────┴──────────┐
+       ▼                     ▼
+Conversation              Knowledge
+   Memory                   Base
+       │                     │
+       ▼                     ▼
+   Supabase               Pinecone
+ PostgreSQL
+```
+
+This separation is exactly what we want.
+
+---
+
+# 9.18 Current complete architecture
+
+```text
+                         React
+                           │
+                           ▼
+                        FastAPI
+                           │
+                  ┌────────┴────────┐
+                  │                 │
+                  ▼                 ▼
+              Documents           Chat
+                  │                 │
+                  ▼                 ▼
+             Local/S3           LangGraph
+                  │                 │
+                  ▼          ┌──────┴──────┐
+             Text/Chunks     │             │
+                  │          ▼             ▼
+                  ▼       History       Retrieval
+              Embeddings     │             │
+                  │          ▼             ▼
+                  ▼       Supabase      Pinecone
+              Pinecone    PostgreSQL        │
+                               │             │
+                               └──────┬──────┘
+                                      ▼
+                                  Context
+                                      │
+                                      ▼
+                                 LLM Factory
+                                      │
+                    ┌─────────────────┼─────────────────┐
+                    ▼                 ▼                 ▼
+                  Groq             OpenAI             Gemini
+                    │                 │                 │
+                    └─────────────────┼─────────────────┘
+                                      ▼
+                                  AI Answer
+                                      │
+                                      ▼
+                                  Supabase
+                                      │
+                                      ▼
+                                    React
+```
+
+---
+
+## What we've completed
+
+```text
+✅ Step 1   FastAPI
+✅ Step 2   Supabase + JWT Authentication
+✅ Step 3   Document Upload
+✅ Step 4   PDF/DOCX/TXT Processing
+✅ Step 5   Embeddings + Pinecone
+✅ Step 6   Semantic Search
+✅ Step 7   Multi-LLM API
+             ├── Groq
+             ├── OpenAI
+             ├── Gemini
+             └── Anthropic
+✅ Step 8   LangGraph RAG Workflow
+✅ Step 9   Chat Sessions + History
+```
+
+### Next: Step 10 — Production-quality RAG
+
+The next improvement should be **not another API endpoint**, but making the RAG workflow intelligent:
+
+```text
+User Question
+      ↓
+Conversation History
+      ↓
+Query Understanding / Rewriting
+      ↓
+Pinecone Retrieval
+      ↓
+Relevance Check
+      ↓
+     ┌───────────────┐
+     │ Relevant?     │
+     └──────┬────────┘
+        YES │ NO
+            │
+       ┌────┴────┐
+       ▼         ▼
+    Generate   Rewrite
+       │         │
+       │         └──→ Retrieve again
+       ▼
+  Answer Validation
+       │
+       ▼
+    Sources
+       │
+       ▼
+    Response
+```
+
+Then we'll add **streaming responses**, **citations/page references**, **document management/delete**, and finally prepare the backend for the React frontend and AWS deployment.
