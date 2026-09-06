@@ -82,9 +82,10 @@ def upload_document(
         )
 
         vector_count = store_chunks(
-            chunks=chunks,
-            user_id=current_user.id,
-            document_id=document.id
+        chunks=chunks,
+        user_id=current_user.id,
+        document_id=document.id,
+        filename=document.filename
         )
 
         document.status = "processed"
