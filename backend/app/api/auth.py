@@ -29,22 +29,23 @@ def register_user(user_data: UserRegister,db: Session = Depends(get_db)):
 
 # login api add
 from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordRequestForm
 from app.core.security import (verify_password,create_access_token)
 
-from app.schemas.auth import (UserLogin,TokenResponse)
+from app.schemas.auth import TokenResponse
 @router.post(
     "/login",
     response_model=TokenResponse
 )
 def login_user(
-    user_data: UserLogin,
+    user_data: OAuth2PasswordRequestForm = Depends(),
     db: Session = Depends(get_db)
 ):
 
     user = (
         db.query(User)
         .filter(
-            User.email == user_data.email
+            User.email == user_data.username
         )
         .first()
     )
