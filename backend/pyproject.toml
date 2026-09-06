@@ -18,4 +18,7 @@ dependencies = [
     "langchain-community>=0.4.2",
     "pypdf>=6.17.0",
     "langchain-text-splitters>=1.1.2",
+    "langchain-huggingface>=1.2.2",
+    "sentence-transformers>=6.0.1",
+    "pinecone>=10.0.0",
 ]

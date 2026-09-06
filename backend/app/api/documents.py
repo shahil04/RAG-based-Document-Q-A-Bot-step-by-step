@@ -14,6 +14,8 @@ from app.database.models import User
 from app.schemas.document import DocumentResponse
 from app.services.storage.local_storage import save_file
 from app.services.document_processor import (process_document)
+from app.rag.vector_store import store_chunks
+
 
 router = APIRouter(
     prefix="/api/documents",
@@ -77,6 +79,12 @@ def upload_document(
 
         chunks = process_document(
             document.file_path
+        )
+
+        vector_count = store_chunks(
+            chunks=chunks,
+            user_id=current_user.id,
+            document_id=document.id
         )
 
         document.status = "processed"
