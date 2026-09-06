@@ -133,6 +133,11 @@ def generate_answer_node(state):
         ""
     )
 
+    chat_history = state.get(
+        "chat_history",
+        []
+    )
+
     provider = state.get(
         "provider",
         "groq"
@@ -153,29 +158,38 @@ def generate_answer_node(state):
         temperature=temperature
     )
 
+    history_text = ""
+
+    for message in chat_history:
+
+        history_text += (
+            f"{message['role']}: "
+            f"{message['content']}\n"
+        )
+
     prompt = f"""
-You are a helpful document question-answering assistant.
+You are a helpful document
+question-answering assistant.
 
-Your job is to answer the user's question
-using ONLY the supplied document context.
+Answer using the supplied document context.
 
-Rules:
+Do not invent information.
 
-1. Do not invent information.
-2. Do not use outside knowledge.
-3. If the answer is not present in the context,
-   clearly say that you could not find the answer
-   in the uploaded documents.
-4. Give a clear and concise answer.
+If the answer is not available in the
+documents, say that you could not find
+the answer in the uploaded documents.
+
+Previous Conversation:
+========================
+{history_text}
+========================
 
 Document Context:
 ========================
-
 {context}
-
 ========================
 
-User Question:
+Current Question:
 {question}
 
 Answer:
@@ -184,7 +198,47 @@ Answer:
     response = llm.invoke(prompt)
 
     return {
-        "answer": content_to_text(
-            response.content
-        )
+        "answer": response.content
     }
+
+# memorynode
+
+from app.database.connection import SessionLocal
+from app.database.models import (ChatMessage,)
+
+def load_history_node(state):
+    session_id = state.get("session_id")
+    if not session_id:
+        return {"chat_history": []}
+
+    db = SessionLocal()
+
+    try:
+        messages = (
+            db.query(ChatMessage)
+            .filter(
+                ChatMessage.session_id
+                == session_id
+            )
+            .order_by(
+                ChatMessage.created_at.asc()
+            )
+            .all()
+        )
+
+        history = []
+
+        for message in messages:
+
+            history.append({
+                "role": message.role,
+                "content": message.content
+            })
+
+        return {
+            "chat_history": history
+        }
+
+    finally:
+
+        db.close()

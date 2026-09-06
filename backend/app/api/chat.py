@@ -1,8 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException
+
+from sqlalchemy.orm import Session
+
 from app.api.auth import get_current_user
-from app.database.models import User
+from app.database.connection import get_db
+from app.database.models import (
+    User,
+    ChatSession,
+    ChatMessage,
+)
 from app.graph.workflow import create_rag_graph
-from app.schemas.chat import (ChatRequest,ChatResponse)
+from app.schemas.chat import (
+    ChatRequest,
+    ChatResponse,
+)
+
 
 router = APIRouter(prefix="/api/chat",tags=["Chat"])
 rag_graph = create_rag_graph()
@@ -12,7 +24,9 @@ def chat(
     request: ChatRequest,
     current_user: User = Depends(
         get_current_user
-    )):
+    ),
+    db: Session = Depends(get_db),
+):
 
     try:
         result = rag_graph.invoke({
@@ -32,6 +46,57 @@ def chat(
         raise HTTPException(
             status_code=500,
             detail="Could not generate an answer")
+
+    session_id = request.session_id
+
+    if session_id:
+
+        session = (
+            db.query(ChatSession)
+            .filter(
+                ChatSession.id == session_id,
+                ChatSession.user_id == current_user.id
+            )
+            .first()
+        )
+
+        if not session:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Chat session not found"
+            )
+
+    else:
+
+        session = ChatSession(
+            user_id=current_user.id,
+            title=request.question[:100]
+        )
+
+        db.add(session)
+        db.commit()
+        db.refresh(session)
+
+        session_id = session.id
+
+    user_message = ChatMessage(
+        session_id=session_id,
+        role="user",
+        content=request.question
+    )
+
+    db.add(user_message)
+
+    assistant_message = ChatMessage(
+        session_id=session_id,
+        role="assistant",
+        content=result["answer"]
+    )
+
+    db.add(assistant_message)
+
+    db.commit()
 
     return ChatResponse(
         answer=result["answer"],

@@ -7,6 +7,7 @@ from langgraph.graph import (
 from app.graph.state import RAGState
 
 from app.graph.nodes import (
+    load_history_node,
     retrieve_node,
     build_context_node,
     generate_answer_node,
@@ -17,7 +18,11 @@ def create_rag_graph():
 
     graph = StateGraph(RAGState)
 
-    # Add nodes
+    graph.add_node(
+        "load_history",
+        load_history_node
+    )
+
     graph.add_node(
         "retrieve",
         retrieve_node
@@ -33,9 +38,13 @@ def create_rag_graph():
         generate_answer_node
     )
 
-    # Define workflow
     graph.add_edge(
         START,
+        "load_history"
+    )
+
+    graph.add_edge(
+        "load_history",
         "retrieve"
     )
 
