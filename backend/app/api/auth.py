@@ -8,28 +8,40 @@ from sqlalchemy.orm import Session
 from app.core.security import hash_password
 from app.database.connection import get_db
 from app.database.models import User
-from app.schemas.auth import (
-    UserRegister,
-    UserResponse
-)
+from app.schemas.auth import (UserRegister,UserResponse)
 
+router = APIRouter(prefix="/api/auth",tags=["Authentication"])
 
-router = APIRouter(
-    prefix="/api/auth",
-    tags=["Authentication"]
-)
+@router.post("/register",response_model=UserResponse,status_code=status.HTTP_201_CREATED)
+def register_user(user_data: UserRegister,db: Session = Depends(get_db)):
+    existing_user = (db.query(User).filter(User.email == user_data.email).first())
 
+    if existing_user:
+        raise HTTPException(status_code=400,detail="Email already registered")
+
+    new_user = User(name=user_data.name,email=user_data.email,
+                    password_hash=hash_password(user_data.password))
+
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+# login api add
+from fastapi.security import OAuth2PasswordBearer
+from app.core.security import (verify_password,create_access_token)
+
+from app.schemas.auth import (UserLogin,TokenResponse)
 @router.post(
-    "/register",
-    response_model=UserResponse,
-    status_code=status.HTTP_201_CREATED
+    "/login",
+    response_model=TokenResponse
 )
-def register_user(
-    user_data: UserRegister,
+def login_user(
+    user_data: UserLogin,
     db: Session = Depends(get_db)
 ):
 
-    existing_user = (
+    user = (
         db.query(User)
         .filter(
             User.email == user_data.email
@@ -37,25 +49,30 @@ def register_user(
         .first()
     )
 
-    if existing_user:
+    if not user:
 
         raise HTTPException(
-            status_code=400,
-            detail="Email already registered"
+            status_code=401,
+            detail="Invalid email or password"
         )
 
-    new_user = User(
-        name=user_data.name,
-        email=user_data.email,
-        password_hash=hash_password(
-            user_data.password
-        )
+    valid_password = verify_password(
+        user_data.password,
+        user.password_hash
     )
 
-    db.add(new_user)
+    if not valid_password:
 
-    db.commit()
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
 
-    db.refresh(new_user)
+    access_token = create_access_token(
+        user.id
+    )
 
-    return new_user
+    return {
+        "access_token": access_token,
+        "token_type": "bearer"
+    }
